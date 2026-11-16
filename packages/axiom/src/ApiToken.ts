@@ -3,6 +3,7 @@ import { deepEqual, isResolved } from "alchemy/Diff";
 import * as Provider from "alchemy/Provider";
 import { Resource } from "alchemy/Resource";
 import * as Data from "effect/Data";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import type { Providers } from "./Providers.ts";
@@ -89,6 +90,7 @@ export const ApiTokenProvider = () =>
       const create = yield* Axiom.createAPIToken;
       const get = yield* Axiom.getAPIToken;
       const del = yield* Axiom.deleteAPIToken;
+      const regenerate = yield* Axiom.regenerateAPIToken;
       const listTokens = yield* Axiom.getAPITokens;
 
       return {
@@ -109,9 +111,13 @@ export const ApiTokenProvider = () =>
             }));
           }),
         diff: Effect.fn(function* ({ olds, news, output }) {
-          if (!isResolved(news)) return undefined;
           // First create — let the engine create normally.
           if (output == null) return undefined;
+          // Inputs not known until apply (the name of a dataset that is being
+          // replaced, say) may resolve to new values or to the old ones. An
+          // update that keeps nothing stable makes consumers wait for this
+          // token's `id` and `token`; `reconcile` decides whether to rotate.
+          if (!isResolved(news)) return { action: "update", stables: [] } as const;
           // Axiom has no update endpoint for tokens, so any actual change
           // to the inputs forces a replacement (which mints a new bearer
           // value). If nothing changed, fall through to `noop` so we don't
@@ -119,22 +125,28 @@ export const ApiTokenProvider = () =>
           if (deepEqual(olds, news)) return undefined;
           return { action: "replace" } as const;
         }),
-        reconcile: Effect.fn(function* ({ news, output }) {
-          // Observe — Axiom does not expose an update endpoint for tokens,
-          // so any actual change to the inputs is forced to a replacement
-          // by `diff` above. That means by the time `reconcile` runs we
-          // are either (a) creating fresh, or (b) re-reconciling identical
-          // inputs against an existing token.
-          if (output !== undefined) {
-            // Identical inputs — Axiom does not echo the bearer back, so
-            // the cached `output` (with the persisted Redacted token) is
-            // the authoritative current state.
+        reconcile: Effect.fn(function* ({ news, olds, output }) {
+          // Observe — Axiom does not echo the bearer back, so the cached
+          // `output` (with the persisted Redacted token) is the current state
+          // while the inputs are the ones it was minted with.
+          if (output !== undefined && (olds === undefined || deepEqual(olds, news))) {
             return output;
           }
 
           // Ensure — mint a new token. Axiom returns the bearer exactly
           // once; capture it into Redacted state for downstream consumers.
-          const result = yield* create(news);
+          // Changed inputs reach here only from an update `diff` planned
+          // over unresolved inputs. Regenerating mints the new token and
+          // revokes the old one in one call; an old token already gone is
+          // created afresh.
+          const result =
+            output === undefined
+              ? yield* create(news)
+              : yield* regenerate({
+                  id: output.id,
+                  existingTokenExpiresAt: DateTime.formatIso(yield* DateTime.now),
+                  newToken: news,
+                }).pipe(Effect.catchTag("NotFound", () => create(news)));
           if (!result.token) {
             return yield* Effect.die(new MissingApiTokenValue({ id: result.id }));
           }
