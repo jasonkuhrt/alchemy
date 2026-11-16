@@ -109,9 +109,13 @@ export const ApiTokenProvider = () =>
             }));
           }),
         diff: Effect.fn(function* ({ olds, news, output }) {
-          if (!isResolved(news)) return undefined;
           // First create — let the engine create normally.
           if (output == null) return undefined;
+          // Inputs not known until apply (a dataset name that is being
+          // replaced, say) may differ, and only a replacement can change a
+          // token: one planned as an update would keep the old token, and its
+          // consumers would keep its `id` and `token`.
+          if (!isResolved(news)) return { action: "replace" } as const;
           // Axiom has no update endpoint for tokens, so any actual change
           // to the inputs forces a replacement (which mints a new bearer
           // value). If nothing changed, fall through to `noop` so we don't
